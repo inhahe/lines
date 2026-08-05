@@ -1,0 +1,735 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lines &amp; Areas</title>
+<style>
+  html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; background: #fff; }
+  canvas { display: block; }
+  #ui {
+    position: fixed; top: 12px; left: 12px;
+    font: 12px/1.45 "Segoe UI", system-ui, sans-serif;
+    color: #111;
+    background: rgba(255,255,255,0.88);
+    border: 1px solid rgba(0,0,0,0.25);
+    border-radius: 6px;
+    padding: 10px 12px;
+    backdrop-filter: blur(3px);
+    user-select: none;
+    min-width: 186px;
+    box-shadow: 0 2px 10px rgba(0,0,0,0.15);
+  }
+  #ui.hidden { display: none; }
+  #ui h1 { font-size: 12px; margin: 0 0 8px; letter-spacing: .08em; text-transform: uppercase; opacity: .6; font-weight: 600; }
+  #ui label { display: block; margin: 7px 0; }
+  #ui .row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  #ui input[type=range] { width: 100%; margin: 2px 0 0; }
+  #ui .val { opacity: .6; font-variant-numeric: tabular-nums; }
+  #ui .keys { margin-top: 9px; padding-top: 8px; border-top: 1px solid rgba(0,0,0,0.12); opacity: .55; font-size: 11px; }
+  #ui button { font: inherit; padding: 3px 9px; border: 1px solid rgba(0,0,0,.3); background: #fff; border-radius: 4px; cursor: pointer; }
+  #ui button:hover { background: #f0f0f0; }
+  #ui .stat { opacity: .55; font-size: 11px; margin-top: 6px; font-variant-numeric: tabular-nums; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+
+<div id="ui">
+  <h1>Lines &amp; Areas</h1>
+
+  <label class="row">
+    <span>Show lines (black)</span>
+    <input type="checkbox" id="showLines">
+  </label>
+
+  <label class="row">
+    <span id="gpuLabel">GPU (WebGL)</span>
+    <input type="checkbox" id="gpu" checked>
+  </label>
+
+  <label>
+    <span class="row"><span>Lines</span><span class="val" id="vCount">40</span></span>
+    <input type="range" id="count" min="2" max="60" step="1" value="40">
+  </label>
+
+  <label>
+    <span class="row"><span>Drift speed</span><span class="val" id="vSpeed">1.00</span></span>
+    <input type="range" id="speed" min="0" max="3" step="0.01" value="1">
+  </label>
+
+  <label>
+    <span class="row"><span>Rotation speed</span><span class="val" id="vSpin">1.00</span></span>
+    <input type="range" id="spin" min="0" max="3" step="0.01" value="1">
+  </label>
+
+  <div class="row" style="margin-top:9px">
+    <button id="reseed">Reseed</button>
+    <button id="pause">Pause</button>
+  </div>
+
+  <div class="stat" id="stat">areas: 0</div>
+  <div class="keys">L lines &middot; G gpu &middot; Space pause &middot; R reseed &middot; H hide panel</div>
+</div>
+
+<script>
+"use strict";
+
+/* ------------------------------------------------------------------ *
+ * Lines & Areas
+ *
+ * A set of infinite lines drifts (x/y) and rotates across the window.
+ * Every velocity is drawn from a bell curve (Box-Muller normal deviate).
+ *
+ * The lines cut the plane into convex faces. The key trick: in an
+ * arrangement of infinite lines, a face is uniquely and permanently
+ * identified by its SIGN VECTOR -- which side of each line it lies on.
+ * A face is born the moment that combination of half-planes first
+ * becomes non-empty (three line segments diverging from a point) and
+ * dies when it becomes empty again (three converging on a point).
+ * So the sign vector is the identity we hang a random colour on:
+ * invented on birth, forgotten on death.
+ * ------------------------------------------------------------------ */
+
+/* Two interchangeable renderers share all the geometry; only the last
+   step (turning faces into pixels) differs. A <canvas> can only ever
+   hand out one kind of context, so switching renderers means replacing
+   the element -- see initRenderer(). */
+let canvas = document.getElementById("c");
+let ctx = null;   // Canvas2D context, when that renderer is active
+let gl = null;    // WebGL context, when that one is
+
+let W = 0, H = 0, DPR = 1;
+
+/* Faces are tracked over a region larger than the window, so that an
+   area drifting off-screen and back keeps its colour instead of being
+   "reborn" at the window edge. */
+const UNIVERSE_PAD = 0.45;   // fraction of window size added on each side
+const HANDLE_PAD   = 0.10;   // line anchor points bounce inside this box
+const AREA_EPS     = 1e-4;   // px^2; below this a face counts as non-existent
+
+const P = {
+  showLines: false,
+  count: 40,
+  speed: 1,     // multiplier on the normally-distributed drift velocities
+  spin: 1,      // multiplier on the normally-distributed angular velocities
+  paused: false,
+  gpu: true     // WebGL renderer; falls back to Canvas2D if unavailable
+};
+
+/* Probe for WebGL on a throwaway canvas -- asking the real one would
+   permanently commit it to a context type. */
+const GL_AVAILABLE = (() => {
+  try {
+    const probe = document.createElement("canvas");
+    const g = probe.getContext("webgl") || probe.getContext("experimental-webgl");
+    if (!g) return false;
+    const ext = g.getExtension("WEBGL_lose_context");
+    if (ext) ext.loseContext();          // don't hold a context open
+    return true;
+  } catch (e) { return false; }
+})();
+
+/* Optional overrides from the URL, e.g.
+   index.html?lines=0&n=22&speed=1.5&spin=0.4&hud=0                   */
+const QS = new URLSearchParams(location.search);
+const qsNum = (k, lo, hi, dflt) => {
+  const v = parseFloat(QS.get(k));
+  return Number.isFinite(v) ? Math.min(hi, Math.max(lo, v)) : dflt;
+};
+P.count     = Math.round(qsNum("n", 2, 60, P.count));
+P.speed     = qsNum("speed", 0, 3, P.speed);
+P.spin      = qsNum("spin", 0, 3, P.spin);
+P.showLines = QS.has("lines") ? QS.get("lines") !== "0" : P.showLines;
+P.gpu       = (QS.has("gpu") ? QS.get("gpu") !== "0" : P.gpu) && GL_AVAILABLE;
+P.paused    = QS.has("paused") ? QS.get("paused") !== "0" : P.paused;
+const HUD   = !QS.has("hud") || QS.get("hud") !== "0";
+
+const BASE_DRIFT = 46;   // px/sec, sigma of the translation bell curve
+const BASE_SPIN  = 0.20; // rad/sec, sigma of the rotation bell curve
+
+/* ---------------------------------------------------------------- */
+/* Random                                                            */
+/* ---------------------------------------------------------------- */
+
+/* All randomness goes through rnd() so that ?seed=N reproduces a scene
+   exactly -- handy for coming back to a pattern you liked, and it lets
+   the two renderers be compared on identical input. */
+let rndState = (QS.has("seed") ? (parseInt(QS.get("seed"), 10) | 0) : (Date.now() | 0)) >>> 0;
+function rnd() {                                   // mulberry32
+  rndState = (rndState + 0x6D2B79F5) >>> 0;
+  let t = rndState;
+  t = Math.imul(t ^ (t >>> 15), t | 1);
+  t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+  return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+}
+
+/** Normal deviate, mean 0, given standard deviation (Box-Muller). */
+function gauss(sigma) {
+  let u = 0, v = 0;
+  while (u === 0) u = rnd();
+  while (v === 0) v = rnd();
+  return sigma * Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
+}
+
+/** HSL -> RGB, all inputs/outputs 0..1 except h in degrees. */
+function hslToRgb(h, s, l) {
+  const c = (1 - Math.abs(2 * l - 1)) * s;
+  const hp = (h / 60) % 6;
+  const x = c * (1 - Math.abs((hp % 2) - 1));
+  let r = 0, g = 0, b = 0;
+  if (hp < 1)      { r = c; g = x; }
+  else if (hp < 2) { r = x; g = c; }
+  else if (hp < 3) { g = c; b = x; }
+  else if (hp < 4) { g = x; b = c; }
+  else if (hp < 5) { r = x; b = c; }
+  else             { r = c; b = x; }
+  const m = l - c / 2;
+  return [r + m, g + m, b + m];
+}
+
+/* A colour is generated once as 8-bit RGB and both renderers consume
+   exactly those numbers -- the CSS string is built from the same bytes
+   the shader gets, so the two paths are pixel-identical rather than
+   merely similar. */
+function randColor() {
+  const [r, g, b] = hslToRgb(rnd() * 360,
+                             (45 + rnd() * 45) / 100,
+                             (32 + rnd() * 40) / 100);
+  const R = Math.round(r * 255), G = Math.round(g * 255), B = Math.round(b * 255);
+  return {
+    css: "rgb(" + R + "," + G + "," + B + ")",
+    r: R / 255, g: G / 255, b: B / 255
+  };
+}
+const BLACK = { css: "#000", r: 0, g: 0, b: 0 };
+
+/* ---------------------------------------------------------------- */
+/* Geometry helpers                                                  */
+/* ---------------------------------------------------------------- */
+
+/** Clip a convex polygon (flat [x0,y0,x1,y1,...]) to a half-plane.
+ *  Keeps the side where ((q - o) . n) * s >= 0.  Sutherland-Hodgman. */
+function clipHalf(poly, ox, oy, nx, ny, s) {
+  const m = poly.length >> 1;
+  const out = [];
+  if (m === 0) return out;
+  let ax = poly[(m - 1) * 2], ay = poly[(m - 1) * 2 + 1];
+  let da = ((ax - ox) * nx + (ay - oy) * ny) * s;
+  for (let i = 0; i < m; i++) {
+    const bx = poly[i * 2], by = poly[i * 2 + 1];
+    const db = ((bx - ox) * nx + (by - oy) * ny) * s;
+    if (db >= 0) {
+      if (da < 0) {
+        const t = da / (da - db);
+        out.push(ax + (bx - ax) * t, ay + (by - ay) * t);
+      }
+      out.push(bx, by);
+    } else if (da >= 0) {
+      const t = da / (da - db);
+      out.push(ax + (bx - ax) * t, ay + (by - ay) * t);
+    }
+    ax = bx; ay = by; da = db;
+  }
+  return out;
+}
+
+function polyArea(poly) {
+  const m = poly.length >> 1;
+  if (m < 3) return 0;
+  let a = 0;
+  let px = poly[(m - 1) * 2], py = poly[(m - 1) * 2 + 1];
+  for (let i = 0; i < m; i++) {
+    const x = poly[i * 2], y = poly[i * 2 + 1];
+    a += px * y - x * py;
+    px = x; py = y;
+  }
+  return Math.abs(a) * 0.5;
+}
+
+/* ---------------------------------------------------------------- */
+/* Lines                                                             */
+/* ---------------------------------------------------------------- */
+
+/* A line is an anchor point (x, y) plus an angle th, extended to
+   infinity in both directions.  Direction d = (cos th, sin th); the
+   left normal n = (-sin th, cos th) rotates continuously with the line,
+   which is what makes the sign vector a continuous, flicker-free
+   identity even as a line turns through half a revolution.
+   vx, vy, w are unit-sigma normal deviates, scaled by the UI sliders,
+   so the whole population's speeds stay bell-distributed. */
+let lines = [];
+
+function handleBox() {
+  const px = W * HANDLE_PAD, py = H * HANDLE_PAD;
+  return { x0: -px, y0: -py, x1: W + px, y1: H + py };
+}
+
+function universeBox() {
+  const px = W * UNIVERSE_PAD, py = H * UNIVERSE_PAD;
+  return { x0: -px, y0: -py, x1: W + px, y1: H + py };
+}
+
+function makeLine() {
+  const b = handleBox();
+  return {
+    x: b.x0 + rnd() * (b.x1 - b.x0),
+    y: b.y0 + rnd() * (b.y1 - b.y0),
+    th: rnd() * Math.PI * 2,
+    vx: gauss(1),
+    vy: gauss(1),
+    w:  gauss(1)
+  };
+}
+
+function setLineCount(n) {
+  while (lines.length > n) lines.pop();
+  while (lines.length < n) lines.push(makeLine());
+}
+
+function reseed() {
+  lines = [];
+  setLineCount(P.count);
+  colors.clear();
+}
+
+function update(dt) {
+  const b = handleBox();
+  const dv = BASE_DRIFT * P.speed;
+  const dw = BASE_SPIN * P.spin;
+  for (const L of lines) {
+    L.x += L.vx * dv * dt;
+    L.y += L.vy * dv * dt;
+    L.th += L.w * dw * dt;          // never wrapped: keeps the normal continuous
+    if (L.x < b.x0) { L.x = b.x0; L.vx = -L.vx; }
+    else if (L.x > b.x1) { L.x = b.x1; L.vx = -L.vx; }
+    if (L.y < b.y0) { L.y = b.y0; L.vy = -L.vy; }
+    else if (L.y > b.y1) { L.y = b.y1; L.vy = -L.vy; }
+  }
+}
+
+/* ---------------------------------------------------------------- */
+/* Arrangement: split the universe by each line in turn              */
+/* ---------------------------------------------------------------- */
+
+function computeCells() {
+  const b = universeBox();
+  let cells = [{
+    poly: [b.x0, b.y0, b.x1, b.y0, b.x1, b.y1, b.x0, b.y1],
+    key: ""
+  }];
+
+  for (const L of lines) {
+    const nx = -Math.sin(L.th), ny = Math.cos(L.th);
+    const next = [];
+    for (let ci = 0; ci < cells.length; ci++) {
+      const c = cells[ci];
+      const pos = clipHalf(c.poly, L.x, L.y, nx, ny, 1);
+      if (pos.length >= 6 && polyArea(pos) > AREA_EPS) next.push({ poly: pos, key: c.key + "+" });
+      const neg = clipHalf(c.poly, L.x, L.y, nx, ny, -1);
+      if (neg.length >= 6 && polyArea(neg) > AREA_EPS) next.push({ poly: neg, key: c.key + "-" });
+    }
+    cells = next;
+  }
+  return cells;
+}
+
+/* Sign vector -> colour.  Born on first sight, destroyed when the face
+   is no longer part of the arrangement. */
+const colors = new Map();
+let generation = 0;
+
+function assignColors(cells) {
+  generation++;
+  for (const c of cells) {
+    let e = colors.get(c.key);
+    if (e === undefined) {                 // area begins: invent a colour
+      e = { col: randColor(), gen: generation };
+      colors.set(c.key, e);
+    } else {
+      e.gen = generation;
+    }
+    c.col = e.col;
+  }
+  for (const [k, e] of colors) {           // area ends: forget it
+    if (e.gen !== generation) colors.delete(k);
+  }
+}
+
+/* ---------------------------------------------------------------- */
+/* Drawing                                                           */
+/* ---------------------------------------------------------------- */
+
+const LINE_WIDTH = 1.4;
+let visibleCount = 0;   // faces actually drawn last frame (rest were off-window)
+
+/* Faces are tracked over a region much larger than the window (see
+   UNIVERSE_PAD), so bounding-box cull the ones that can't be seen --
+   typically a third of them -- rather than paying to rasterise them.
+   Shared by both renderers so they always draw the same set. */
+function polyVisible(p) {
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  for (let i = 0; i < p.length; i += 2) {
+    const x = p[i], y = p[i + 1];
+    if (x < x0) x0 = x;
+    if (x > x1) x1 = x;
+    if (y < y0) y0 = y;
+    if (y > y1) y1 = y;
+  }
+  return !(x1 < 0 || y1 < 0 || x0 > W || y0 > H);
+}
+
+/** Liang-Barsky clip of an infinite line to the window.
+ *  Returns [x0,y0,x1,y1], or null if it misses entirely. */
+function lineSegment(L) {
+  const dx = Math.cos(L.th), dy = Math.sin(L.th);
+  let t0 = -Infinity, t1 = Infinity;
+  const p = [-dx, dx, -dy, dy];
+  const q = [L.x, W - L.x, L.y, H - L.y];
+  for (let i = 0; i < 4; i++) {
+    if (Math.abs(p[i]) < 1e-12) { if (q[i] < 0) return null; continue; }
+    const r = q[i] / p[i];
+    if (p[i] < 0) { if (r > t1) return null; if (r > t0) t0 = r; }
+    else          { if (r < t0) return null; if (r < t1) t1 = r; }
+  }
+  if (!(t0 < t1)) return null;
+  return [L.x + dx * t0, L.y + dy * t0, L.x + dx * t1, L.y + dy * t1];
+}
+
+function draw(cells) {
+  if (gl) drawGL(cells); else draw2D(cells);
+}
+
+/* ---------------- Canvas2D renderer ------------------------------ */
+
+function draw2D(cells) {
+  ctx.fillStyle = "#fff";
+  ctx.fillRect(0, 0, W, H);
+
+  /* Each face is filled *and* stroked in its own colour: Canvas2D
+     antialiases every path against what is already in the buffer, so
+     without the stroke the shared edges show as pale hairline seams. */
+  ctx.lineJoin = "round";
+  ctx.lineWidth = 1;
+  let drawn = 0;
+  for (const c of cells) {
+    const p = c.poly;
+    if (!polyVisible(p)) continue;
+    drawn++;
+    ctx.beginPath();
+    ctx.moveTo(p[0], p[1]);
+    for (let i = 2; i < p.length; i += 2) ctx.lineTo(p[i], p[i + 1]);
+    ctx.closePath();
+    ctx.fillStyle = c.col.css;
+    ctx.strokeStyle = c.col.css;
+    ctx.fill();
+    ctx.stroke();
+  }
+  visibleCount = drawn;
+
+  if (P.showLines) {
+    ctx.strokeStyle = BLACK.css;
+    ctx.lineWidth = LINE_WIDTH;
+    ctx.beginPath();
+    for (const L of lines) {
+      const s = lineSegment(L);
+      if (!s) continue;
+      ctx.moveTo(s[0], s[1]);
+      ctx.lineTo(s[2], s[3]);
+    }
+    ctx.stroke();
+  }
+}
+
+/* ---------------- WebGL renderer --------------------------------- */
+/* Every face is fan-triangulated into one big interleaved buffer and
+   sent as a single drawArrays call, so the per-face JS/driver overhead
+   that dominates the Canvas2D path disappears.
+   No seam stroke is needed here: multisampling assigns each sample to
+   exactly one triangle, so shared edges meet exactly.                */
+
+const GL_VS = [
+  "attribute vec2 a_pos;",
+  "attribute vec3 a_col;",
+  "uniform vec2 u_res;",
+  "varying vec3 v_col;",
+  "void main() {",
+  "  vec2 c = a_pos / u_res * 2.0 - 1.0;",
+  "  gl_Position = vec4(c.x, -c.y, 0.0, 1.0);",
+  "  v_col = a_col;",
+  "}"
+].join("\n");
+
+const GL_FS = [
+  "precision mediump float;",
+  "varying vec3 v_col;",
+  "void main() { gl_FragColor = vec4(v_col, 1.0); }"
+].join("\n");
+
+const FLOATS_PER_VERT = 5;          // x, y, r, g, b
+let glProg = null, glBuf = null, glLocRes = null;
+let glData = new Float32Array(1 << 16);
+let glN = 0;                        // floats written this frame
+
+function glCompile(type, src) {
+  const sh = gl.createShader(type);
+  gl.shaderSource(sh, src);
+  gl.compileShader(sh);
+  if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) {
+    throw new Error("shader: " + gl.getShaderInfoLog(sh));
+  }
+  return sh;
+}
+
+function initGL() {
+  glProg = gl.createProgram();
+  gl.attachShader(glProg, glCompile(gl.VERTEX_SHADER, GL_VS));
+  gl.attachShader(glProg, glCompile(gl.FRAGMENT_SHADER, GL_FS));
+  gl.linkProgram(glProg);
+  if (!gl.getProgramParameter(glProg, gl.LINK_STATUS)) {
+    throw new Error("link: " + gl.getProgramInfoLog(glProg));
+  }
+  gl.useProgram(glProg);
+
+  glBuf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, glBuf);
+  const stride = FLOATS_PER_VERT * 4;
+  const aPos = gl.getAttribLocation(glProg, "a_pos");
+  const aCol = gl.getAttribLocation(glProg, "a_col");
+  gl.enableVertexAttribArray(aPos);
+  gl.vertexAttribPointer(aPos, 2, gl.FLOAT, false, stride, 0);
+  gl.enableVertexAttribArray(aCol);
+  gl.vertexAttribPointer(aCol, 3, gl.FLOAT, false, stride, 8);
+  glLocRes = gl.getUniformLocation(glProg, "u_res");
+  gl.clearColor(1, 1, 1, 1);
+}
+
+function glReserve(floats) {
+  if (glN + floats <= glData.length) return;
+  let cap = glData.length;
+  while (cap < glN + floats) cap *= 2;
+  const bigger = new Float32Array(cap);
+  bigger.set(glData.subarray(0, glN));
+  glData = bigger;
+}
+
+function glVert(x, y, col) {
+  glData[glN++] = x;
+  glData[glN++] = y;
+  glData[glN++] = col.r;
+  glData[glN++] = col.g;
+  glData[glN++] = col.b;
+}
+
+function drawGL(cells) {
+  glN = 0;
+  let drawn = 0;
+
+  for (const c of cells) {
+    const p = c.poly;
+    if (!polyVisible(p)) continue;
+    drawn++;
+    const m = p.length >> 1;
+    glReserve((m - 2) * 3 * FLOATS_PER_VERT);
+    for (let i = 1; i + 1 < m; i++) {            // triangle fan from vertex 0
+      glVert(p[0], p[1], c.col);
+      glVert(p[i * 2], p[i * 2 + 1], c.col);
+      glVert(p[(i + 1) * 2], p[(i + 1) * 2 + 1], c.col);
+    }
+  }
+  visibleCount = drawn;
+
+  if (P.showLines) {
+    /* WebGL's lineWidth is capped at 1 on virtually all drivers, so
+       expand each segment into a quad to match the Canvas2D width. */
+    const hw = LINE_WIDTH / 2;
+    for (const L of lines) {
+      const s = lineSegment(L);
+      if (!s) continue;
+      const ex = s[2] - s[0], ey = s[3] - s[1];
+      const len = Math.hypot(ex, ey);
+      if (len < 1e-9) continue;
+      const nx = -ey / len * hw, ny = ex / len * hw;
+      glReserve(6 * FLOATS_PER_VERT);
+      glVert(s[0] + nx, s[1] + ny, BLACK);
+      glVert(s[0] - nx, s[1] - ny, BLACK);
+      glVert(s[2] + nx, s[3] + ny, BLACK);
+      glVert(s[2] + nx, s[3] + ny, BLACK);
+      glVert(s[0] - nx, s[1] - ny, BLACK);
+      glVert(s[2] - nx, s[3] - ny, BLACK);
+    }
+  }
+
+  gl.viewport(0, 0, canvas.width, canvas.height);
+  gl.uniform2f(glLocRes, W, H);
+  gl.clear(gl.COLOR_BUFFER_BIT);
+  gl.bufferData(gl.ARRAY_BUFFER, glData.subarray(0, glN), gl.DYNAMIC_DRAW);
+  gl.drawArrays(gl.TRIANGLES, 0, glN / FLOATS_PER_VERT);
+}
+
+/* ---------------- Renderer selection ----------------------------- */
+
+/** (Re)build the canvas element and acquire the requested context.
+ *  A canvas is permanently bound to the first context type it hands
+ *  out, so switching renderers requires a fresh element. */
+function initRenderer(wantGL) {
+  const fresh = document.createElement("canvas");
+  fresh.id = "c";
+  canvas.replaceWith(fresh);
+  canvas = fresh;
+  ctx = null;
+  gl = null;
+
+  if (wantGL && GL_AVAILABLE) {
+    try {
+      gl = canvas.getContext("webgl", {
+        alpha: false, depth: false, stencil: false,
+        antialias: true, preserveDrawingBuffer: false
+      });
+      if (gl) initGL();
+    } catch (e) {
+      console.warn("WebGL init failed, falling back to Canvas2D:", e);
+      gl = null;
+    }
+  }
+  if (!gl) ctx = canvas.getContext("2d", { alpha: false });
+
+  /* A lost context (driver reset, tab backgrounded too long) would
+     otherwise leave a permanently blank window. */
+  canvas.addEventListener("webglcontextlost", (e) => {
+    e.preventDefault();
+    P.gpu = false;
+    initRenderer(false);
+    syncLabels();
+  });
+
+  P.gpu = !!gl;
+  statAcc = 0;                 // fps average shouldn't span two renderers
+  statFrames = 0;
+  resize();
+}
+
+/* ---------------------------------------------------------------- */
+/* Main loop                                                         */
+/* ---------------------------------------------------------------- */
+
+const statEl = document.getElementById("stat");
+let last = performance.now();
+const STAT_PERIOD = 0.4;   // seconds between readout refreshes
+let statAcc = 0;
+let statFrames = 0;
+let statFps = 0;
+let statPrimed = false;
+
+function frame(now) {
+  let dt = (now - last) / 1000;
+  last = now;
+  if (dt > 0.1) dt = 0.1;              // don't lurch after a stall
+  if (!P.paused) update(dt);
+
+  const cells = computeCells();
+  assignColors(cells);
+  draw(cells);
+
+  /* Readout. The area count and fps are refreshed together on one timer;
+     once fps is known it is never dropped from the string again. (The
+     primer below must be a true one-shot: an earlier version keyed it on
+     statFrames === 1, which recurred every cycle because the timer resets
+     statFrames to 0, so the fps flashed for a single frame each time.) */
+  statAcc += dt;
+  statFrames++;
+  if (!statPrimed) {
+    statPrimed = true;
+    statEl.textContent = "areas: " + visibleCount;   // fps not measurable yet
+  }
+  if (statAcc >= STAT_PERIOD) {
+    statFps = statFrames / statAcc;
+    statEl.textContent = "areas: " + visibleCount + "   " + statFps.toFixed(0) +
+                         " fps   " + (gl ? "webgl" : "canvas2d");
+    statAcc = 0;
+    statFrames = 0;
+  }
+  requestAnimationFrame(frame);
+}
+
+/* ---------------------------------------------------------------- */
+/* Setup / UI                                                        */
+/* ---------------------------------------------------------------- */
+
+function resize() {
+  DPR = Math.min(window.devicePixelRatio || 1, 2);
+  W = window.innerWidth;
+  H = window.innerHeight;
+  canvas.width = Math.max(1, Math.round(W * DPR));
+  canvas.height = Math.max(1, Math.round(H * DPR));
+  canvas.style.width = W + "px";
+  canvas.style.height = H + "px";
+  /* Both renderers work in CSS pixels: Canvas2D via the transform,
+     WebGL via the u_res uniform plus a device-pixel viewport. */
+  if (ctx) ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  if (gl) gl.viewport(0, 0, canvas.width, canvas.height);
+}
+
+const ui = document.getElementById("ui");
+const elShow  = document.getElementById("showLines");
+const elCount = document.getElementById("count");
+const elSpeed = document.getElementById("speed");
+const elSpin  = document.getElementById("spin");
+const elPause = document.getElementById("pause");
+const elGpu   = document.getElementById("gpu");
+
+function syncLabels() {
+  elCount.value = P.count;
+  elSpeed.value = P.speed;
+  elSpin.value = P.spin;
+  document.getElementById("vCount").textContent = P.count;
+  document.getElementById("vSpeed").textContent = P.speed.toFixed(2);
+  document.getElementById("vSpin").textContent  = P.spin.toFixed(2);
+  elShow.checked = P.showLines;
+  elGpu.checked = P.gpu;
+  elPause.textContent = P.paused ? "Resume" : "Pause";
+}
+
+elShow.addEventListener("change", () => { P.showLines = elShow.checked; });
+elGpu.addEventListener("change", () => { setRenderer(elGpu.checked); });
+
+/** Swap renderers. P.gpu is re-read from initRenderer() so the checkbox
+ *  reflects what actually happened, not what was asked for. */
+function setRenderer(wantGL) {
+  initRenderer(wantGL);
+  syncLabels();
+}
+elCount.addEventListener("input", () => {
+  P.count = +elCount.value; setLineCount(P.count); syncLabels();
+});
+elSpeed.addEventListener("input", () => { P.speed = +elSpeed.value; syncLabels(); });
+elSpin.addEventListener("input",  () => { P.spin  = +elSpin.value;  syncLabels(); });
+elPause.addEventListener("click", () => { P.paused = !P.paused; syncLabels(); });
+document.getElementById("reseed").addEventListener("click", reseed);
+
+window.addEventListener("keydown", (e) => {
+  if (e.target.tagName === "INPUT" && e.key !== "l" && e.key !== "L") return;
+  switch (e.key) {
+    case "l": case "L": P.showLines = !P.showLines; syncLabels(); break;
+    case "g": case "G": if (GL_AVAILABLE) setRenderer(!P.gpu); break;
+    case " ": P.paused = !P.paused; syncLabels(); e.preventDefault(); break;
+    case "r": case "R": reseed(); break;
+    case "h": case "H": ui.classList.toggle("hidden"); break;
+  }
+});
+
+window.addEventListener("resize", resize);
+
+if (!GL_AVAILABLE) {
+  elGpu.disabled = true;
+  document.getElementById("gpuLabel").textContent = "GPU (unavailable)";
+}
+
+initRenderer(P.gpu);        // also calls resize()
+reseed();
+syncLabels();
+if (!HUD) ui.classList.add("hidden");
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
