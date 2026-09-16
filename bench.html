@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>bench</title>
+<style>body{font:14px monospace;margin:12px}canvas{display:none}</style></head>
+<body>
+<canvas id="c" width="1920" height="1080"></canvas>
+<pre id="out">running...</pre>
+<script>
+/* Times the real per-frame work (arrangement + fill/stroke of every face)
+   synchronously, so headless Chrome reports it before the first paint. */
+const ctx = document.getElementById('c').getContext('2d', {alpha:false});
+const W=1920,H=1080,PX=W*0.45,PY=H*0.45;
+const B={x0:-PX,y0:-PY,x1:W+PX,y1:H+PY};
+const AREA_EPS=1e-4;
+
+function clipHalf(poly,ox,oy,nx,ny,s){const m=poly.length>>1;const out=[];if(m===0)return out;
+ let ax=poly[(m-1)*2],ay=poly[(m-1)*2+1];let da=((ax-ox)*nx+(ay-oy)*ny)*s;
+ for(let i=0;i<m;i++){const bx=poly[i*2],by=poly[i*2+1];const db=((bx-ox)*nx+(by-oy)*ny)*s;
+  if(db>=0){if(da<0){const t=da/(da-db);out.push(ax+(bx-ax)*t,ay+(by-ay)*t);}out.push(bx,by);}
+  else if(da>=0){const t=da/(da-db);out.push(ax+(bx-ax)*t,ay+(by-ay)*t);}
+  ax=bx;ay=by;da=db;}return out;}
+function polyArea(poly){const m=poly.length>>1;if(m<3)return 0;let a=0,px=poly[(m-1)*2],py=poly[(m-1)*2+1];
+ for(let i=0;i<m;i++){const x=poly[i*2],y=poly[i*2+1];a+=px*y-x*py;px=x;py=y;}return Math.abs(a)*0.5;}
+function computeCells(lines){let cells=[{poly:[B.x0,B.y0,B.x1,B.y0,B.x1,B.y1,B.x0,B.y1],key:""}];
+ for(const L of lines){const nx=-Math.sin(L.th),ny=Math.cos(L.th);const next=[];
+  for(const c of cells){const pos=clipHalf(c.poly,L.x,L.y,nx,ny,1);
+   if(pos.length>=6&&polyArea(pos)>AREA_EPS)next.push({poly:pos,key:c.key+"+"});
+   const neg=clipHalf(c.poly,L.x,L.y,nx,ny,-1);
+   if(neg.length>=6&&polyArea(neg)>AREA_EPS)next.push({poly:neg,key:c.key+"-"});}
+  cells=next;}return cells;}
+function mk(n){const o=[];for(let i=0;i<n;i++)o.push({x:-W*.1+Math.random()*W*1.2,y:-H*.1+Math.random()*H*1.2,
+ th:Math.random()*Math.PI*2,vx:Math.random()-.5,vy:Math.random()-.5,w:(Math.random()-.5)*.4});return o;}
+
+const colors=new Map();let gen=0;
+/* mode: 0 = draw all faces, fill+stroke      (lines.html before culling)
+         1 = cull off-window faces, fill+stroke   (lines.html Canvas2D path)
+         2 = cull, fill only (no seam stroke)
+         3 = geometry + colour bookkeeping only, no drawing         */
+function frame(lines,dt,mode){
+  for(const L of lines){L.x+=L.vx*46*dt;L.y+=L.vy*46*dt;L.th+=L.w*.2*dt;}
+  const cells=computeCells(lines);
+  gen++;
+  for(const c of cells){let e=colors.get(c.key);
+   if(!e){e={css:'hsl('+(Math.random()*360|0)+' 70% 50%)',gen};colors.set(c.key,e);}else e.gen=gen;c.css=e.css;}
+  for(const [k,e] of colors) if(e.gen!==gen) colors.delete(k);
+  if(mode===3) return cells.length;
+  ctx.fillStyle="#fff";ctx.fillRect(0,0,W,H);
+  ctx.lineJoin="round";ctx.lineWidth=1;
+  let drawn=0;
+  for(const c of cells){const p=c.poly;
+   if(mode!==0){                                   // bbox cull against the window
+     let x0=Infinity,y0=Infinity,x1=-Infinity,y1=-Infinity;
+     for(let i=0;i<p.length;i+=2){const x=p[i],y=p[i+1];
+       if(x<x0)x0=x; if(x>x1)x1=x; if(y<y0)y0=y; if(y>y1)y1=y;}
+     if(x1<0||y1<0||x0>W||y0>H) continue;
+   }
+   drawn++;
+   ctx.beginPath();ctx.moveTo(p[0],p[1]);
+   for(let i=2;i<p.length;i+=2)ctx.lineTo(p[i],p[i+1]);ctx.closePath();
+   ctx.fillStyle=c.css;ctx.fill();
+   if(mode!==2){ctx.strokeStyle=c.css;ctx.stroke();}}
+  lastDrawn=drawn;
+  return cells.length;
+}
+let lastDrawn=0;
+
+const MODES=["all faces, fill+stroke","culled, fill+stroke","culled, fill only","geometry only"];
+let txt="1920x1080 window, universe = window +45% each side\n";
+for(let mode=0;mode<4;mode++){
+  txt+="\n"+MODES[mode]+"\n lines  faces  drawn   ms/frame   budget@60fps\n";
+  for(const n of [14,40,60,80]){
+    const lines=mk(n);
+    for(let i=0;i<5;i++) frame(lines,1/60,mode);       // warm up
+    const REPS=40;
+    const t0=performance.now();
+    let faces=0;
+    for(let r=0;r<REPS;r++) faces=frame(lines,1/60,mode);
+    const ms=(performance.now()-t0)/REPS;
+    txt+=String(n).padStart(6)+String(faces).padStart(7)+
+         String(mode===3?0:lastDrawn).padStart(7)+ms.toFixed(2).padStart(11)+
+         (" "+(ms/16.67*100).toFixed(0)+"%").padStart(15)+"\n";
+    colors.clear();
+  }
+}
+document.getElementById('out').textContent=txt;
+</script>
+</body></html>

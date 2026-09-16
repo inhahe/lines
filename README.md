@@ -95,3 +95,9 @@ area partitioning, unique sign vectors), the birth/death behaviour at a triple
 point, the colour lifecycle, the Gaussian sampler, the seeded RNG, the colour
 conversion shared by both renderers, and a regression test for an fps-readout
 flicker bug.
+
+
+## License
+
+MIT - see [LICENSE](LICENSE). Free to use, modify and redistribute; provided
+as-is, with no warranty.

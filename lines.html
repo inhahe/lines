@@ -2,13 +2,27 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#ffffff">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <title>Lines &amp; Areas</title>
 <style>
-  html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; background: #fff; }
-  canvas { display: block; }
+  html, body {
+    margin: 0; padding: 0; height: 100%; overflow: hidden; background: #fff;
+    overscroll-behavior: none;            /* no pull-to-refresh / rubber band */
+  }
+  /* touch-action:none stops a drag on the artwork from scrolling or zooming
+     the page -- without it every swipe fights the browser. */
+  canvas { display: block; touch-action: none; }
+
+  /* Safe-area insets keep the panel and button clear of notches and the
+     iOS home indicator (needs viewport-fit=cover, set above). */
   #ui {
-    position: fixed; top: 12px; left: 12px;
+    position: fixed;
+    top: calc(12px + env(safe-area-inset-top));
+    left: calc(12px + env(safe-area-inset-left));
     font: 12px/1.45 "Segoe UI", system-ui, sans-serif;
     color: #111;
     background: rgba(255,255,255,0.88);
@@ -16,26 +30,101 @@
     border-radius: 6px;
     padding: 10px 12px;
     backdrop-filter: blur(3px);
-    user-select: none;
+    user-select: none; -webkit-user-select: none; -webkit-touch-callout: none;
     min-width: 186px;
     box-shadow: 0 2px 10px rgba(0,0,0,0.15);
+    /* dvh tracks the mobile address bar sliding in and out; the vh line
+       above it is the fallback for browsers that lack dvh. */
+    max-height: calc(100vh - 24px - env(safe-area-inset-top) - env(safe-area-inset-bottom));
+    max-height: calc(100dvh - 24px - env(safe-area-inset-top) - env(safe-area-inset-bottom));
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
   }
   #ui.hidden { display: none; }
-  #ui h1 { font-size: 12px; margin: 0 0 8px; letter-spacing: .08em; text-transform: uppercase; opacity: .6; font-weight: 600; }
+  #ui h1 {
+    font-size: 12px; margin: 0 0 8px; letter-spacing: .08em;
+    text-transform: uppercase; opacity: .6; font-weight: 600;
+    padding-right: 26px;                  /* room for the close button */
+  }
   #ui label { display: block; margin: 7px 0; }
   #ui .row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-  #ui input[type=range] { width: 100%; margin: 2px 0 0; }
+  #ui input[type=range] { width: 100%; margin: 2px 0 0; touch-action: pan-y; }
+  #ui input[type=checkbox] { width: 16px; height: 16px; }
   #ui .val { opacity: .6; font-variant-numeric: tabular-nums; }
   #ui .keys { margin-top: 9px; padding-top: 8px; border-top: 1px solid rgba(0,0,0,0.12); opacity: .55; font-size: 11px; }
   #ui button { font: inherit; padding: 3px 9px; border: 1px solid rgba(0,0,0,.3); background: #fff; border-radius: 4px; cursor: pointer; }
   #ui button:hover { background: #f0f0f0; }
   #ui .stat { opacity: .55; font-size: 11px; margin-top: 6px; font-variant-numeric: tabular-nums; }
+
+  /* Panel show/hide without a keyboard: an X inside the panel, and a
+     floating button that appears when the panel is closed. */
+  .tap { touch-action: manipulation; -webkit-tap-highlight-color: transparent; }
+  #close {
+    position: absolute; top: 4px; right: 4px;
+    width: 30px; height: 30px; line-height: 1;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 17px; padding: 0; border: 0; background: transparent;
+    color: #111; opacity: .45; cursor: pointer; border-radius: 6px;
+  }
+  #close:hover { opacity: .9; background: rgba(0,0,0,.07); }
+  #open {
+    position: fixed;
+    top: calc(12px + env(safe-area-inset-top));
+    left: calc(12px + env(safe-area-inset-left));
+    width: 44px; height: 44px;            /* full touch target */
+    display: none; align-items: center; justify-content: center;
+    font: 18px/1 system-ui, sans-serif;
+    background: rgba(255,255,255,0.86);
+    border: 1px solid rgba(0,0,0,0.25);
+    border-radius: 8px;
+    backdrop-filter: blur(3px);
+    box-shadow: 0 2px 10px rgba(0,0,0,0.15);
+    cursor: pointer; color: #111;
+    user-select: none; -webkit-user-select: none;
+  }
+  #open.show { display: flex; }
+
+  /* Phones: bigger text and controls, and a panel that can't outgrow the
+     screen. 16px inputs also stop iOS auto-zooming on focus. */
+  @media (max-width: 700px), (pointer: coarse) {
+    #ui {
+      font-size: 14px;
+      min-width: 0;
+      width: calc(100vw - 24px - env(safe-area-inset-left) - env(safe-area-inset-right));
+      max-width: 340px;
+      padding: 12px 14px;
+    }
+    #ui h1 { font-size: 13px; }
+    #ui label { margin: 12px 0; }
+    #ui input[type=range] { height: 28px; }
+    #ui input[type=checkbox] { width: 22px; height: 22px; }
+    #ui button { padding: 9px 16px; font-size: 14px; border-radius: 6px; }
+    #ui .keys { display: none; }         /* no keyboard on a phone */
+    #ui .stat { font-size: 12px; }
+    #close { width: 36px; height: 36px; font-size: 20px; opacity: .6; }
+    #ui h1 { padding-right: 32px; }
+  }
+
+  /* Landscape phone: only ~350px of height, so tighten the panel back up
+     rather than making the user scroll it. */
+  @media (max-height: 500px) {
+    #ui { padding: 8px 12px; font-size: 13px; }
+    #ui h1 { margin-bottom: 5px; }
+    #ui label { margin: 6px 0; }
+    #ui input[type=range] { height: 20px; }
+    #ui button { padding: 5px 12px; font-size: 13px; }
+    #ui .stat { margin-top: 4px; }
+    #close { width: 28px; height: 28px; font-size: 17px; }
+  }
 </style>
 </head>
 <body>
 <canvas id="c"></canvas>
 
+<button id="open" class="tap" aria-label="Show controls" title="Show controls">&#9776;</button>
+
 <div id="ui">
+  <button id="close" class="tap" aria-label="Hide controls" title="Hide controls">&times;</button>
   <h1>Lines &amp; Areas</h1>
 
   <label class="row">
@@ -131,7 +220,7 @@ const GL_AVAILABLE = (() => {
 })();
 
 /* Optional overrides from the URL, e.g.
-   index.html?lines=0&n=22&speed=1.5&spin=0.4&hud=0                   */
+   lines.html?lines=0&n=22&speed=1.5&spin=0.4&hud=0                   */
 const QS = new URLSearchParams(location.search);
 const qsNum = (k, lo, hi, dflt) => {
   const v = parseFloat(QS.get(k));
@@ -656,10 +745,27 @@ function frame(now) {
 /* Setup / UI                                                        */
 /* ---------------------------------------------------------------- */
 
+/* Phones report devicePixelRatio of 3-4; rendering every one of those
+   pixels is pure waste on a display this small, and the fill cost scales
+   with the square -- so the ratio is capped at 2. That cap alone handles
+   phones (390x844 @3 becomes 1.3M pixels).
+   The pixel budget below is a second, much looser ceiling for very large
+   canvases. It is deliberately set above a retina laptop at 2x (1440x900
+   @2 = 5.2M) and a large tablet (1024x1366 @2 = 5.6M) so those stay
+   pixel-perfect; only genuinely enormous canvases get scaled down. */
+const MAX_DEVICE_PIXELS = 6e6;
+
+function pickDPR(w, h) {
+  let d = Math.min(window.devicePixelRatio || 1, 2);
+  const budget = Math.sqrt(MAX_DEVICE_PIXELS / Math.max(1, w * h));
+  if (d > budget) d = Math.max(1, budget);
+  return d;
+}
+
 function resize() {
-  DPR = Math.min(window.devicePixelRatio || 1, 2);
   W = window.innerWidth;
   H = window.innerHeight;
+  DPR = pickDPR(W, H);
   canvas.width = Math.max(1, Math.round(W * DPR));
   canvas.height = Math.max(1, Math.round(H * DPR));
   canvas.style.width = W + "px";
@@ -671,7 +777,19 @@ function resize() {
 }
 
 const ui = document.getElementById("ui");
+const elOpen  = document.getElementById("open");
+const elClose = document.getElementById("close");
 const elShow  = document.getElementById("showLines");
+
+/* The panel can always be shown/hidden by tapping, so a phone (with no H
+   key) is never stuck with it either open or closed. The floating button
+   stays hidden under ?hud=0, which asks for a completely clean view. */
+function setPanel(visible) {
+  ui.classList.toggle("hidden", !visible);
+  elOpen.classList.toggle("show", !visible && HUD);
+}
+elClose.addEventListener("click", () => setPanel(false));
+elOpen.addEventListener("click", () => setPanel(true));
 const elCount = document.getElementById("count");
 const elSpeed = document.getElementById("speed");
 const elSpin  = document.getElementById("spin");
@@ -714,11 +832,17 @@ window.addEventListener("keydown", (e) => {
     case "g": case "G": if (GL_AVAILABLE) setRenderer(!P.gpu); break;
     case " ": P.paused = !P.paused; syncLabels(); e.preventDefault(); break;
     case "r": case "R": reseed(); break;
-    case "h": case "H": ui.classList.toggle("hidden"); break;
+    case "h": case "H": setPanel(ui.classList.contains("hidden")); break;
   }
 });
 
 window.addEventListener("resize", resize);
+/* Rotating a phone, and the address bar sliding away, both change the
+   viewport without always firing a plain resize in time. */
+window.addEventListener("orientationchange", () => setTimeout(resize, 100));
+if (window.visualViewport) {
+  window.visualViewport.addEventListener("resize", resize);
+}
 
 if (!GL_AVAILABLE) {
   elGpu.disabled = true;
@@ -728,7 +852,25 @@ if (!GL_AVAILABLE) {
 initRenderer(P.gpu);        // also calls resize()
 reseed();
 syncLabels();
-if (!HUD) ui.classList.add("hidden");
+
+/* On a small screen the panel would cover most of the artwork, so start
+   with it closed -- the floating button makes it discoverable. */
+const SMALL_SCREEN = window.matchMedia("(max-width: 700px), (pointer: coarse)").matches;
+setPanel(HUD && !SMALL_SCREEN);
+
+/* On touch devices, tapping the artwork also toggles the panel (the
+   familiar video-player gesture). This is the way back to the controls
+   under ?hud=0, where the floating button is deliberately absent.
+   Listening on window rather than the canvas survives the element being
+   replaced when the renderer is switched. */
+if (SMALL_SCREEN) {
+  window.addEventListener("click", (e) => {
+    if (e.target && e.target.tagName === "CANVAS") {
+      setPanel(ui.classList.contains("hidden"));
+    }
+  });
+}
+
 requestAnimationFrame(frame);
 </script>
 </body>
