@@ -26,10 +26,24 @@ black lines drawn on top (right).*
 | Rotation speed | — | Scales how fast lines turn |
 | Reseed | `R` | Throw away everything and start a fresh random set |
 | Pause | `Space` | Freeze the motion |
-| — | `H` | Hide the control panel |
+| ✕ / ☰ | `H` | Hide / show the control panel |
 
 The panel's readout shows the number of areas currently on screen, the frame
 rate, and which renderer is active.
+
+## On a phone or tablet
+
+It works as a full-screen touch app — no keyboard needed:
+
+- The panel starts **hidden** on small or touch screens, so you get the artwork
+  first. Tap the **☰** button in the corner to open it, and the **✕** in the
+  panel (or a tap anywhere on the artwork) to hide it again.
+- Every control is sized for fingers, and the panel is laid out to fit in
+  portrait *and* landscape without scrolling.
+- The canvas swallows touch scrolling and pull-to-refresh, and respects the
+  notch / home-indicator safe areas.
+- Rendering resolution is capped (device pixel ratio ≤ 2, plus a total-pixel
+  ceiling) so a 3× phone screen doesn't quietly cost 9× the fill rate.
 
 ## URL options
 
@@ -90,11 +104,11 @@ tracking, and why a rotating line doesn't scramble the colours — see
 node test_geometry.js
 ```
 
-53 checks covering the arrangement (face counts against Euler's formula, exact
+64 checks covering the arrangement (face counts against Euler's formula, exact
 area partitioning, unique sign vectors), the birth/death behaviour at a triple
 point, the colour lifecycle, the Gaussian sampler, the seeded RNG, the colour
-conversion shared by both renderers, and a regression test for an fps-readout
-flicker bug.
+conversion shared by both renderers, the mobile device-pixel budget, and a
+regression test for an fps-readout flicker bug.
 
 
 ## License

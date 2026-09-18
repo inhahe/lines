@@ -1,0 +1,7 @@
+
+# Local-only. We publish straight from this directory now instead of copying
+# a filtered subset into D:\github, so these are excluded here instead.
+go.bat
+todo.txt
+design.md
+.claude/

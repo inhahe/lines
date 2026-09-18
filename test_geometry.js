@@ -355,5 +355,49 @@ console.log("rnd() (mulberry32)");
   check("uniform across 10 bins", worst < 0.01, worst.toFixed(4));
 }
 
+/* -- 9. Device-pixel budget (mobile) ------------------------------ *
+ * Phones report devicePixelRatio 3-4; fill cost scales with its square,
+ * so lines.html caps the ratio and then caps total device pixels.
+ * Copied from lines.html. */
+console.log("pickDPR");
+{
+  const MAX_DEVICE_PIXELS = 6e6;
+  function pickDPR(w, h, deviceRatio) {
+    let d = Math.min(deviceRatio || 1, 2);
+    const budget = Math.sqrt(MAX_DEVICE_PIXELS / Math.max(1, w * h));
+    if (d > budget) d = Math.max(1, budget);
+    return d;
+  }
+  const px = (w, h, r) => { const d = pickDPR(w, h, r); return w * d * h * d; };
+
+  check("phone 390x844 @3 -> capped at 2", pickDPR(390, 844, 3) === 2, pickDPR(390, 844, 3));
+  check("phone stays under budget", px(390, 844, 3) <= MAX_DEVICE_PIXELS, px(390, 844, 3));
+  check("phone 412x915 @4 -> capped at 2", pickDPR(412, 915, 4) === 2);
+  check("desktop 1920x1080 @1 -> 1", pickDPR(1920, 1080, 1) === 1);
+  check("hidpi laptop 1440x900 @2 -> 2", pickDPR(1440, 900, 2) === 2);
+
+  // the budget is set above a large hidpi tablet, so that stays pixel-perfect
+  check("tablet 1024x1366 @2 -> 2", pickDPR(1024, 1366, 2) === 2, pickDPR(1024, 1366, 2));
+
+  // a hidpi desktop is where the pixel budget actually bites
+  const big = pickDPR(2560, 1440, 2);
+  check("2560x1440 @2 reduced below 2", big < 2 && big > 1, big);
+  check("2560x1440 @2 lands on the budget",
+        Math.abs(px(2560, 1440, 2) - MAX_DEVICE_PIXELS) < 1e3, px(2560, 1440, 2));
+
+  // never go below 1: a 4K desktop must not be rendered blurry
+  check("4K desktop never below 1", pickDPR(3840, 2160, 1) === 1, pickDPR(3840, 2160, 1));
+  check("huge viewport still >= 1", pickDPR(7680, 4320, 2) === 1);
+
+  // monotonic: a bigger viewport never gets a higher ratio
+  let mono = true, prev = Infinity;
+  for (let w = 300; w <= 4000; w += 100) {
+    const d = pickDPR(w, w * 0.6, 3);
+    if (d > prev + 1e-9) mono = false;
+    prev = d;
+  }
+  check("ratio never increases with viewport size", mono);
+}
+
 console.log(failures === 0 ? "\nAll checks passed." : "\n" + failures + " FAILED");
 process.exit(failures === 0 ? 0 : 1);
