@@ -5,7 +5,7 @@ plane into areas, and each area keeps **one constant random colour for its entir
 life** — invented at the instant it is born, where three lines diverge from a
 point, and destroyed at the instant it dies, where three converge on one.
 
-**▶ Live version: <https://inhahe.com/lines.html>**
+**▶ Live version: <https://inhahe.github.io/lines/lines.html>**
 
 Or just open `lines.html` locally — it's a single self-contained file with no
 dependencies, no build step and no server needed.
